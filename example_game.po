@@ -1,0 +1,67 @@
+# Chinese (Simplified) translation for Fantasy Quest.
+# Copyright (C) 2026 Fantasy Quest Team
+# This file is distributed under the same license as the Fantasy Quest package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Fantasy Quest 1.0.0\n"
+"Report-Msgid-Bugs-To: support@fantasyquest.example.com\n"
+"POT-Creation-Date: 2026-10-01 12:00+0800\n"
+"PO-Revision-Date: 2026-10-01 12:00+0800\n"
+"Last-Translator: Antigravity <translator@example.com>\n"
+"Language-Team: Chinese (Simplified)\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: src/menu.py:12
+msgid "Start New Game"
+msgstr ""
+
+#: src/menu.py:13
+msgid "Load Saved Game"
+msgstr ""
+
+#: src/menu.py:14
+msgid "Settings & Options"
+msgstr ""
+
+#: src/menu.py:15
+msgid "Exit to Desktop"
+msgstr ""
+
+#. Developer Note: Notification when a warrior levels up
+#: src/entities/player.py:105
+#, c-format
+msgid "Hero %s has reached Level %d!"
+msgstr ""
+
+#. Developer Note: Inventory reward message
+#: src/items/chest.py:44
+msgid "You opened the ancient chest and acquired ${gold_amount} Gold and {{item_name}}!"
+msgstr ""
+
+#: src/ui/hud.py:58
+msgid "Welcome back, {player_name}! You have {quest_count} active quests."
+msgstr ""
+
+#: src/network/dialog.py:89
+#, c-format
+msgid "Click <a href=\"%s\">here</a> to read the latest patch notes."
+msgstr ""
+
+#: src/dialogue/npc.py:21
+msgctxt "greeting"
+msgid "Safe travels, adventurer!"
+msgstr ""
+
+#: src/dialogue/npc.py:22
+msgctxt "farewell"
+msgid "Until we meet again under the stars."
+msgstr ""
+
+#: src/combat/spell.py:77
+msgid "Critical Hit! Dealt %d damage to [ENEMY]."
+msgstr ""

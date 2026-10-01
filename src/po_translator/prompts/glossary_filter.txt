@@ -1,0 +1,24 @@
+You are a professional localization terminologist.
+Analyze the following list of candidate phrases extracted algorithmically from a game/software localization project.
+Your goal is to identify genuine domain terms, character names, UI actions, game mechanics, skills, locations, or items that warrant consistent translation across the project.
+
+### CANDIDATES:
+{candidates_json}
+
+### INSTRUCTIONS:
+1. Filter out common grammatical fragments, generic conversational filler, and incomplete fragments.
+2. For each term you recommend keeping, set "keep": true, assign an appropriate "category" (e.g. "ui", "character", "item", "skill", "location", "system"), and give a brief "reason".
+3. For candidates that are NOT proper glossary terms, set "keep": false.
+4. Return ONLY valid JSON adhering strictly to the schema below.
+
+### OUTPUT JSON SCHEMA:
+{
+  "terms": [
+    {
+      "source": "candidate_text_here",
+      "keep": true,
+      "category": "category_name",
+      "reason": "brief reason"
+    }
+  ]
+}

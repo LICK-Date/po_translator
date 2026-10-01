@@ -1,0 +1,2839 @@
+# PO LLM Translator 项目开发规格说明书
+
+## 1. 项目目标
+
+开发一个面向 `.po` / `.pot` 本地化文件的 LLM 辅助翻译工具。
+
+软件必须能够：
+
+1. 读取 GNU gettext `.po` / `.pot` 文件。
+2. 提取需要翻译的字符串。
+3. 对原文进行全局分析。
+4. 自动发现候选术语。
+5. 使用 LLM 对候选术语进行筛选、规范化和翻译。
+6. 建立项目级术语表 Glossary。
+7. 在术语表约束下批量翻译 PO 条目。
+8. 自动保护格式占位符、变量、标签和转义内容。
+9. 对 LLM 输出进行确定性校验。
+10. 对失败条目进行重试、修复或标记人工审核。
+11. 保存翻译进度，支持中断后继续。
+12. 使用 Translation Memory 避免重复调用 LLM。
+13. 允许用户自行配置兼容 OpenAI API 的 LLM 服务。
+14. 最终安全写回新的 `.po` 文件，不破坏原有 PO 元数据。
+
+本项目不是简单的“一行文本调用一次 LLM”的翻译程序。
+
+核心设计原则为：
+
+> 确定性处理由程序负责，语义判断由 LLM 负责。
+
+例如：
+
+- PO 解析由程序负责。
+- 字符串去重由程序负责。
+- 占位符提取由程序负责。
+- 占位符一致性校验由程序负责。
+- 缓存由程序负责。
+- 术语候选统计由程序负责。
+- 术语是否具有翻译价值由 LLM 判断。
+- 实际自然语言翻译由 LLM 完成。
+- 翻译质量审阅可由 LLM 完成。
+- 最终格式是否合法必须由程序判断。
+
+---
+
+# 2. 项目定位
+
+项目首先开发为本地桌面应用，但核心功能不得与 GUI 耦合。
+
+推荐技术栈：
+
+```text
+Python 3.12+
+PySide6
+polib
+httpx
+Pydantic v2
+SQLite
+SQLAlchemy 2.x 或 sqlite3
+pytest
+```
+
+默认优先：
+
+```text
+Python
++
+PySide6
++
+SQLite
++
+OpenAI-compatible API
+```
+
+第一阶段不允许引入：
+
+```text
+LangChain
+LlamaIndex
+复杂 Agent Framework
+Celery
+Redis
+外部数据库
+```
+
+除非后续确实存在明确需求。
+
+LLM 调用层应自行实现。
+
+---
+
+# 3. 总体架构
+
+系统必须采用分层架构。
+
+推荐结构：
+
+```text
+UI
+│
+▼
+Application Service
+│
+├─────────── Project Service
+├─────────── Translation Service
+├─────────── Glossary Service
+└─────────── Validation Service
+│
+▼
+Domain Layer
+│
+├── TranslationEntry
+├── TranslationProject
+├── Glossary
+├── GlossaryTerm
+├── TranslationJob
+└── TranslationResult
+│
+▼
+Infrastructure
+│
+├── PO Reader / Writer
+├── SQLite
+├── LLM Client
+├── Translation Memory
+└── Logging
+```
+
+必须满足：
+
+```text
+GUI → Service → Core
+```
+
+禁止：
+
+```text
+GUI → polib
+GUI → httpx
+GUI → sqlite
+GUI → LLM Prompt
+```
+
+GUI 不允许直接负责业务逻辑。
+
+---
+
+# 4. 推荐目录结构
+
+项目采用 `src` layout：
+
+```text
+po-llm-translator/
+│
+├── pyproject.toml
+├── README.md
+├── LICENSE
+├── .gitignore
+│
+├── src/
+│   └── po_translator/
+│       │
+│       ├── __init__.py
+│       ├── main.py
+│       │
+│       ├── domain/
+│       │   ├── models.py
+│       │   ├── enums.py
+│       │   ├── glossary.py
+│       │   ├── project.py
+│       │   └── translation.py
+│       │
+│       ├── po/
+│       │   ├── reader.py
+│       │   ├── writer.py
+│       │   ├── mapper.py
+│       │   └── placeholder.py
+│       │
+│       ├── terminology/
+│       │   ├── extractor.py
+│       │   ├── candidate.py
+│       │   ├── matcher.py
+│       │   └── llm_filter.py
+│       │
+│       ├── translation/
+│       │   ├── pipeline.py
+│       │   ├── batcher.py
+│       │   ├── translator.py
+│       │   ├── reflection.py
+│       │   ├── repair.py
+│       │   └── validator.py
+│       │
+│       ├── llm/
+│       │   ├── client.py
+│       │   ├── models.py
+│       │   ├── openai_compatible.py
+│       │   ├── rate_limiter.py
+│       │   └── exceptions.py
+│       │
+│       ├── storage/
+│       │   ├── database.py
+│       │   ├── repositories.py
+│       │   ├── translation_memory.py
+│       │   └── migrations.py
+│       │
+│       ├── services/
+│       │   ├── project_service.py
+│       │   ├── glossary_service.py
+│       │   └── translation_service.py
+│       │
+│       ├── prompts/
+│       │   ├── glossary_filter.txt
+│       │   ├── glossary_translate.txt
+│       │   ├── translate.txt
+│       │   ├── reflection.txt
+│       │   └── repair.txt
+│       │
+│       └── ui/
+│           ├── main_window.py
+│           ├── settings_dialog.py
+│           ├── glossary_dialog.py
+│           ├── workers.py
+│           └── models/
+│
+└── tests/
+    ├── unit/
+    ├── integration/
+    ├── fixtures/
+    └── sample_po/
+```
+
+---
+
+# 5. Domain Model
+
+PO 文件不得直接作为核心业务数据结构。
+
+必须定义程序内部领域模型。
+
+## TranslationEntry
+
+推荐：
+
+```python
+@dataclass
+class TranslationEntry:
+    id: str
+
+    msgid: str
+    msgid_plural: str | None
+
+    msgctxt: str | None
+
+    msgstr: str
+    msgstr_plural: dict[int, str]
+
+    comments: list[str]
+    extracted_comments: list[str]
+    occurrences: list[tuple[str, str]]
+    flags: set[str]
+
+    is_obsolete: bool
+    is_fuzzy: bool
+
+    status: TranslationStatus
+```
+
+`id` 必须由程序内部生成。
+
+不得使用列表位置作为唯一 ID。
+
+建议使用以下内容计算稳定 hash：
+
+```text
+msgctxt
++
+msgid
++
+msgid_plural
++
+occurrence
+```
+
+---
+
+# 6. TranslationStatus
+
+至少定义：
+
+```python
+class TranslationStatus(Enum):
+    PENDING = "pending"
+    TRANSLATING = "translating"
+    TRANSLATED = "translated"
+    CACHED = "cached"
+    FAILED = "failed"
+    REVIEW_REQUIRED = "review_required"
+    SKIPPED = "skipped"
+```
+
+任何翻译任务都必须具有明确状态。
+
+禁止使用：
+
+```python
+translated = True
+```
+
+这种过于简单的状态设计。
+
+---
+
+# 7. PO 文件读取规则
+
+必须使用经过验证的 PO 解析库，例如：
+
+```text
+polib
+```
+
+不要自己从头实现 PO parser。
+
+读取时必须保留：
+
+```text
+msgid
+msgid_plural
+msgstr
+msgstr_plural
+msgctxt
+comments
+tcomment
+occurrences
+flags
+obsolete
+```
+
+保存时不得无故删除：
+
+```text
+comments
+source references
+flags
+context
+plural forms
+metadata
+```
+
+---
+
+# 8. PO 翻译筛选逻辑
+
+默认待翻译项：
+
+```text
+msgid 非空
+AND
+not obsolete
+AND
+msgstr 为空
+```
+
+对于 fuzzy：
+
+默认策略：
+
+```text
+不自动覆盖
+```
+
+但设置中允许用户选择：
+
+```text
+跳过 fuzzy
+重新翻译 fuzzy
+仅人工审核 fuzzy
+```
+
+已有译文默认不得覆盖。
+
+必须提供：
+
+```text
+Translate untranslated only
+Translate all
+Translate fuzzy only
+```
+
+三种模式。
+
+---
+
+# 9. Placeholder 系统
+
+这是项目核心模块之一。
+
+必须独立实现：
+
+```text
+placeholder.py
+```
+
+支持至少：
+
+## printf
+
+```text
+%s
+%d
+%f
+%1$s
+%(name)s
+```
+
+## Python format
+
+```text
+{}
+{0}
+{name}
+{name!r}
+{name:.2f}
+```
+
+## HTML/XML
+
+```text
+<b>
+</b>
+<i>
+<color=red>
+```
+
+## 转义
+
+```text
+\n
+\t
+\r
+\\
+```
+
+## 游戏常见变量
+
+允许增加可配置正则：
+
+```text
+[PLAYER]
+<PLAYER>
+$player
+${player}
+{{player}}
+```
+
+必须实现：
+
+```python
+extract_placeholders(text: str) -> list[Placeholder]
+```
+
+以及：
+
+```python
+validate_placeholders(
+    source: str,
+    translation: str
+) -> PlaceholderValidationResult
+```
+
+---
+
+# 10. Placeholder 校验原则
+
+翻译前后：
+
+```text
+placeholder 类型
+数量
+名称
+```
+
+必须一致。
+
+例如：
+
+```text
+Hello {username}
+```
+
+不能翻译为：
+
+```text
+你好 {用户名}
+```
+
+必须保持：
+
+```text
+你好 {username}
+```
+
+对于：
+
+```text
+HP: {current}/{max}
+```
+
+翻译后必须同时存在：
+
+```text
+{current}
+{max}
+```
+
+顺序是否允许变化可根据 placeholder 类型配置。
+
+---
+
+# 11. 术语系统总体流程
+
+术语处理采用：
+
+```text
+程序统计
+↓
+候选术语
+↓
+LLM筛选
+↓
+LLM翻译
+↓
+用户审核
+↓
+锁定 Glossary
+↓
+正文翻译
+```
+
+禁止直接：
+
+```text
+全文 → LLM生成术语
+```
+
+作为唯一方案。
+
+LLM 可以补充术语，但程序必须先产生候选。
+
+---
+
+# 12. 候选术语提取
+
+初始版本主要针对：
+
+```text
+中文
+日文
+英文
+```
+
+候选提取需要独立模块：
+
+```text
+terminology/extractor.py
+```
+
+对于中文：
+
+默认寻找：
+
+```text
+长度 >= 2
+长度 <= configurable max length
+出现次数 >= 2
+```
+
+但不得简单枚举全部 substring 后直接交给用户。
+
+必须加入：
+
+```text
+频率过滤
+长度过滤
+重叠过滤
+字符类型过滤
+stop words
+```
+
+建议候选包含：
+
+```python
+@dataclass
+class TermCandidate:
+    text: str
+    frequency: int
+    length: int
+    examples: list[str]
+    score: float
+```
+
+---
+
+# 13. 候选术语去噪
+
+以下通常不应该作为术语：
+
+```text
+常用助词
+普通标点
+单独数字
+纯占位符
+过短字符串
+明显字符串残片
+```
+
+例如：
+
+```text
+装备强化成功
+装备强化失败
+```
+
+候选可能有：
+
+```text
+装备
+强化
+装备强化
+强化成功
+强化失败
+```
+
+算法不能认为全部都是正式术语。
+
+这一层只负责候选，不负责最终判断。
+
+---
+
+# 14. LLM 术语筛选
+
+候选术语批量发送给 LLM。
+
+必须要求 Structured Output。
+
+目标格式：
+
+```json
+{
+  "terms": [
+    {
+      "source": "装备强化",
+      "keep": true,
+      "category": "game_system",
+      "reason": "..."
+    }
+  ]
+}
+```
+
+程序只信任：
+
+```text
+source
+keep
+category
+```
+
+`reason` 仅用于 UI 展示，不参与程序决策。
+
+如果返回 JSON 无法解析：
+
+```text
+重试一次
+↓
+仍失败
+↓
+整个 batch 标记 FAILED
+```
+
+不得偷偷从自然语言中用正则猜 JSON。
+
+---
+
+# 15. Glossary Model
+
+```python
+@dataclass
+class GlossaryTerm:
+    id: str
+
+    source: str
+    target: str | None
+
+    category: str | None
+
+    description: str | None
+
+    locked: bool
+
+    frequency: int
+
+    created_by: str
+```
+
+`created_by` 可为：
+
+```text
+algorithm
+llm
+user
+import
+```
+
+---
+
+# 16. Glossary 优先级
+
+用户手动修改后的术语：
+
+```text
+locked = True
+```
+
+锁定术语禁止被 LLM 自动重新翻译。
+
+优先级：
+
+```text
+User locked
+>
+Imported
+>
+Reviewed LLM
+>
+Automatic candidate
+```
+
+---
+
+# 17. 术语翻译
+
+术语筛选完成后，统一批量翻译术语。
+
+输入：
+
+```json
+{
+  "source_language": "ja",
+  "target_language": "zh-CN",
+  "terms": [
+    "魔導石",
+    "王都",
+    "聖騎士"
+  ]
+}
+```
+
+输出：
+
+```json
+{
+  "translations": [
+    {
+      "source": "魔導石",
+      "target": "魔导石"
+    }
+  ]
+}
+```
+
+术语翻译完成以后，用户可以修改。
+
+用户确认后才能进入正文正式翻译。
+
+但设置允许：
+
+```text
+Auto approve glossary
+```
+
+默认关闭。
+
+---
+
+# 18. 术语匹配
+
+正式翻译每个 batch 时：
+
+禁止发送整个 Glossary。
+
+必须先检测 batch 中实际出现的术语。
+
+例如 Glossary 有：
+
+```text
+2000
+```
+
+条术语。
+
+当前 batch 只包含：
+
+```text
+16
+```
+
+条。
+
+则 prompt 中只能加入这 16 条相关术语。
+
+接口：
+
+```python
+match_glossary(
+    text: str,
+    glossary: list[GlossaryTerm]
+) -> list[GlossaryTerm]
+```
+
+初版可使用：
+
+```text
+Trie
+Aho-Corasick
+或可靠 substring matcher
+```
+
+如果实现复杂度过高，第一版本可采用优化后的字符串匹配，但必须与 UI 解耦。
+
+---
+
+# 19. Translation Memory
+
+必须实现 Translation Memory。
+
+目的：
+
+避免完全相同文本重复调用 LLM。
+
+TM Key 至少包含：
+
+```text
+source_language
+target_language
+msgid
+msgctxt
+```
+
+另外必须考虑：
+
+```text
+glossary version
+prompt version
+```
+
+推荐 hash：
+
+```python
+sha256(
+    source_language
+    + target_language
+    + msgctxt
+    + msgid
+    + glossary_hash
+    + translation_profile
+)
+```
+
+---
+
+# 20. Translation Memory 命中
+
+翻译流程：
+
+```text
+Entry
+↓
+TM lookup
+├─ HIT → CACHED
+└─ MISS → LLM
+```
+
+TM 命中不得调用 LLM。
+
+用户可以：
+
+```text
+Disable translation memory
+Clear project TM
+```
+
+---
+
+# 21. LLM 配置
+
+软件支持多个 API Profile。
+
+模型配置：
+
+```python
+class LLMProfile:
+    name: str
+
+    base_url: str
+    api_key: str
+    model: str
+
+    temperature: float
+
+    timeout_seconds: float
+
+    rpm: int | None
+    max_concurrency: int
+
+    max_retries: int
+```
+
+---
+
+# 22. API 设计
+
+默认兼容：
+
+```text
+OpenAI Chat Completions compatible API
+```
+
+支持用户填写：
+
+```text
+Base URL
+API Key
+Model
+```
+
+例如：
+
+```text
+https://api.openai.com/v1
+https://api.deepseek.com
+http://localhost:11434/v1
+```
+
+不得在 Translation Service 中判断 provider：
+
+禁止：
+
+```python
+if provider == "openai":
+elif provider == "deepseek":
+elif provider == "ollama":
+```
+
+核心只依赖：
+
+```python
+class LLMClient(Protocol):
+
+    async def complete(
+        self,
+        request: LLMRequest
+    ) -> LLMResponse:
+        ...
+```
+
+---
+
+# 23. LLM Request
+
+```python
+class LLMRequest(BaseModel):
+
+    system_prompt: str
+
+    messages: list[Message]
+
+    temperature: float
+
+    response_schema: dict | None
+```
+
+---
+
+# 24. LLM Response
+
+```python
+class LLMResponse(BaseModel):
+
+    content: str
+
+    model: str | None
+
+    prompt_tokens: int | None
+    completion_tokens: int | None
+
+    raw: dict | None
+```
+
+---
+
+# 25. API Key 安全
+
+API Key 禁止：
+
+```text
+写入日志
+写入错误信息
+打印到 console
+进入 crash report
+```
+
+存储策略第一版可以：
+
+```text
+本机配置文件
+```
+
+但必须避免：
+
+```text
+明文出现在日志
+```
+
+后续可考虑系统 keychain。
+
+---
+
+# 26. Batch Translation
+
+严禁：
+
+```text
+一个 Entry = 一个 API 请求
+```
+
+默认采用 batch。
+
+例如：
+
+```text
+20~50 entries / batch
+```
+
+但不能只以数量切 batch。
+
+同时限制：
+
+```text
+总字符长度
+估算 token
+```
+
+推荐配置：
+
+```text
+max_entries_per_batch = 30
+max_chars_per_batch = 10000
+```
+
+---
+
+# 27. Batch 请求协议
+
+每个 Entry 使用内部 ID。
+
+请求：
+
+```json
+{
+  "entries": [
+    {
+      "id": "abc123",
+      "text": "Start Game"
+    },
+    {
+      "id": "abc124",
+      "text": "Load Game"
+    }
+  ]
+}
+```
+
+LLM：
+
+```json
+{
+  "translations": [
+    {
+      "id": "abc123",
+      "translation": "开始游戏"
+    },
+    {
+      "id": "abc124",
+      "translation": "读取游戏"
+    }
+  ]
+}
+```
+
+禁止要求 LLM 返回原文作为映射依据。
+
+必须使用 ID。
+
+---
+
+# 28. Translation Prompt
+
+Prompt 必须至少说明：
+
+```text
+源语言
+目标语言
+内容类型
+翻译要求
+术语表
+占位符保护规则
+输出 JSON schema
+禁止添加解释
+```
+
+Glossary 示例：
+
+```text
+圣遗物 -> Artifact
+暴击率 -> CRIT Rate
+元素精通 -> Elemental Mastery
+```
+
+Prompt 中明确：
+
+```text
+Only apply glossary terms when the source text contains the corresponding source term.
+
+Do not alter placeholders.
+
+Do not add explanations.
+
+Return valid JSON only.
+```
+
+---
+
+# 29. 翻译 Pipeline
+
+Pipeline 必须可配置。
+
+默认：
+
+```text
+TM Lookup
+↓
+Initial Translation
+↓
+Placeholder Validation
+↓
+Glossary Validation
+↓
+Structural Validation
+↓
+Accept / Repair / Retry
+```
+
+不得默认所有文本使用三阶段 Reflection。
+
+---
+
+# 30. 翻译模式
+
+至少支持：
+
+## Fast
+
+```text
+Translate
+↓
+Validate
+```
+
+## Quality
+
+```text
+Translate
+↓
+Reflection
+↓
+Improve
+↓
+Validate
+```
+
+## Smart
+
+推荐默认：
+
+```text
+Translate
+↓
+Validate
+↓
+if suspicious:
+    Reflection
+    Improve
+↓
+Validate
+```
+
+Smart 模式应作为长期推荐模式。
+
+---
+
+# 31. Reflection
+
+Reflection 输入：
+
+```text
+Source
+Initial Translation
+Relevant Glossary
+Context
+```
+
+输出：
+
+```json
+{
+  "issues": [
+    {
+      "type": "terminology",
+      "description": "..."
+    }
+  ],
+  "needs_revision": true
+}
+```
+
+如果：
+
+```text
+needs_revision = false
+```
+
+无需调用 Improve。
+
+---
+
+# 32. Improve
+
+只有 Reflection 判断需要修改时调用。
+
+输出：
+
+```json
+{
+  "translation": "..."
+}
+```
+
+之后必须再次执行全部 deterministic validators。
+
+---
+
+# 33. Validator
+
+必须独立于 LLM。
+
+至少包含：
+
+```text
+PlaceholderValidator
+EmptyTranslationValidator
+GlossaryValidator
+StructureValidator
+EntryCountValidator
+JSONValidator
+```
+
+统一接口：
+
+```python
+class Validator(Protocol):
+
+    def validate(
+        self,
+        source,
+        translation,
+        context
+    ) -> ValidationResult:
+        ...
+```
+
+---
+
+# 34. ValidationResult
+
+```python
+class ValidationResult:
+
+    valid: bool
+
+    errors: list[ValidationIssue]
+
+    warnings: list[ValidationIssue]
+```
+
+错误与警告必须区分。
+
+例如：
+
+```text
+placeholder 丢失 = ERROR
+术语疑似不一致 = WARNING / ERROR
+译文过长 = WARNING
+```
+
+---
+
+# 35. Repair
+
+如果 placeholder 错误：
+
+优先使用专门 Repair Prompt。
+
+例如：
+
+```text
+The following translation has incorrect placeholders.
+
+Source:
+Hello {username}
+
+Incorrect translation:
+你好 {用户名}
+
+Required placeholders:
+{username}
+
+Fix only the translation.
+Do not change its meaning.
+```
+
+修复后再次 validator。
+
+---
+
+# 36. Retry 策略
+
+错误分类：
+
+## 网络
+
+```text
+timeout
+connection reset
+HTTP 429
+HTTP 5xx
+```
+
+允许自动 retry。
+
+## 内容
+
+```text
+invalid JSON
+missing ID
+placeholder broken
+```
+
+允许有限次数 repair / retry。
+
+## 配置
+
+```text
+401
+403
+invalid model
+invalid URL
+```
+
+立即停止任务。
+
+禁止无限 retry。
+
+---
+
+# 37. Retry Backoff
+
+网络错误：
+
+```text
+exponential backoff
+```
+
+例如：
+
+```text
+1s
+2s
+4s
+8s
+```
+
+增加随机 jitter。
+
+默认最大：
+
+```text
+3~5 retries
+```
+
+---
+
+# 38. Rate Limiter
+
+必须独立模块实现。
+
+同时支持：
+
+```text
+RPM
+max concurrency
+```
+
+例如：
+
+```text
+max_concurrency = 5
+rpm = 60
+```
+
+即使同时创建 5 个 worker，也必须遵守 RPM。
+
+---
+
+# 39. 并发模型
+
+推荐：
+
+```text
+asyncio
++
+httpx.AsyncClient
++
+Semaphore
+```
+
+PySide6 GUI 中不得直接运行阻塞网络请求。
+
+GUI 与 asyncio 的整合可使用：
+
+```text
+QThread
+worker thread
+独立 asyncio event loop
+```
+
+确保：
+
+```text
+GUI thread 永不执行 LLM HTTP 请求
+```
+
+---
+
+# 40. Project
+
+项目必须可以保存。
+
+`.po` 文件本身不能作为唯一项目状态。
+
+TranslationProject 至少包含：
+
+```text
+project_id
+name
+
+source_file
+source_language
+target_language
+
+created_at
+updated_at
+
+glossary
+translation status
+API profile reference
+settings
+```
+
+---
+
+# 41. SQLite
+
+推荐数据库表：
+
+```text
+projects
+
+entries
+
+glossary_terms
+
+translation_memory
+
+translation_results
+
+api_profiles
+
+settings
+
+jobs
+```
+
+---
+
+# 42. entries
+
+至少：
+
+```text
+id
+project_id
+
+msgid
+msgctxt
+msgid_plural
+
+status
+
+current_translation
+
+source_hash
+
+updated_at
+```
+
+无需完整重复 PO metadata，是否存储视实现而定。
+
+但必须能够恢复翻译状态。
+
+---
+
+# 43. translation_results
+
+建议记录历史翻译结果：
+
+```text
+entry_id
+
+stage
+model
+
+source
+translation
+
+validation_status
+
+created_at
+```
+
+stage：
+
+```text
+initial
+improved
+repair
+manual
+```
+
+这样以后 UI 可实现：
+
+```text
+翻译历史
+```
+
+---
+
+# 44. 崩溃恢复
+
+每成功完成一个 batch：
+
+必须持久化。
+
+禁止：
+
+```text
+整个文件翻译结束才 save
+```
+
+程序崩溃以后：
+
+重新打开项目必须能够继续处理：
+
+```text
+PENDING
+FAILED
+```
+
+不得重新调用已完成条目。
+
+---
+
+# 45. GUI
+
+GUI 使用：
+
+```text
+PySide6 Qt Widgets
+```
+
+第一版本不要使用 QML。
+
+主界面建议：
+
+```text
+┌───────────────────────────────────────────────┐
+│ File  Project  Translation  Tools  Settings  │
+├─────────────┬─────────────────────────────────┤
+│ Entry List  │ Source                          │
+│             │                                 │
+│ ✓           ├─────────────────────────────────┤
+│ ○           │ Translation                     │
+│ ⚠           │                                 │
+│             ├─────────────────────────────────┤
+│             │ Context / Comments              │
+├─────────────┴─────────────────────────────────┤
+│ Progress                420 / 1250            │
+└───────────────────────────────────────────────┘
+```
+
+---
+
+# 46. Entry List
+
+至少显示：
+
+```text
+状态
+原文
+译文
+```
+
+状态视觉：
+
+```text
+pending
+translated
+cached
+failed
+review
+```
+
+支持筛选：
+
+```text
+All
+Pending
+Translated
+Failed
+Review Required
+```
+
+---
+
+# 47. Translation Editor
+
+用户必须可以手工修改译文。
+
+手动修改：
+
+```text
+stage = manual
+```
+
+并覆盖 LLM 最终结果。
+
+不得因为后续重开项目而丢失。
+
+---
+
+# 48. Glossary Editor
+
+独立页面或 panel。
+
+字段：
+
+```text
+Source
+Target
+Category
+Frequency
+Locked
+```
+
+操作：
+
+```text
+Add
+Delete
+Edit
+Lock
+Unlock
+Regenerate
+```
+
+用户编辑后自动：
+
+```text
+locked = true
+```
+
+---
+
+# 49. API Settings
+
+提供：
+
+```text
+Profile Name
+
+Base URL
+
+API Key
+
+Model
+
+Temperature
+
+RPM
+
+Concurrency
+
+Timeout
+
+Retry Count
+```
+
+按钮：
+
+```text
+Test Connection
+```
+
+测试请求应极短。
+
+测试成功显示：
+
+```text
+Connection successful
+```
+
+失败显示：
+
+```text
+HTTP status
+error category
+sanitized message
+```
+
+不得显示 API Key。
+
+---
+
+# 50. Translation Settings
+
+至少：
+
+```text
+Translation Mode
+
+Batch Size
+
+Source Language
+
+Target Language
+
+Translate Existing
+
+Translate Fuzzy
+
+Use Translation Memory
+
+Use Glossary
+
+Auto Repair Placeholder
+
+Max Retry
+```
+
+---
+
+# 51. Progress
+
+翻译过程中 UI 显示：
+
+```text
+total
+pending
+translated
+cached
+failed
+review
+```
+
+例如：
+
+```text
+Translated 568 / 1240
+Cached 197
+Failed 3
+```
+
+---
+
+# 52. Cancellation
+
+必须支持 Cancel。
+
+取消翻译时：
+
+```text
+不杀死程序
+不丢失已完成结果
+停止创建新的 batch
+允许当前请求结束或合理 cancel
+```
+
+状态保持一致。
+
+---
+
+# 53. Logging
+
+使用标准：
+
+```python
+logging
+```
+
+或：
+
+```text
+structlog
+```
+
+但第一版标准 logging 足够。
+
+必须定义日志等级：
+
+```text
+DEBUG
+INFO
+WARNING
+ERROR
+```
+
+禁止：
+
+```text
+print()
+```
+
+作为正式日志方式。
+
+---
+
+# 54. Sensitive Logging
+
+以下不得记录：
+
+```text
+API Key
+Authorization Header
+完整用户密钥
+```
+
+请求日志可以记录：
+
+```text
+model
+URL hostname
+token usage
+request duration
+HTTP status
+```
+
+---
+
+# 55. Prompt 管理
+
+Prompt 不允许大段硬编码在 Python 文件。
+
+必须存放：
+
+```text
+prompts/
+```
+
+Prompt 应有：
+
+```text
+version
+```
+
+例如代码常量：
+
+```python
+TRANSLATE_PROMPT_VERSION = "1.0"
+```
+
+方便 Translation Memory invalidation。
+
+---
+
+# 56. Context
+
+PO 字符串通常缺少上下文。
+
+翻译时可以使用：
+
+```text
+msgctxt
+comments
+extracted comments
+source references
+```
+
+作为 context。
+
+不要默认使用前一条和后一条 PO entry。
+
+只有在确认这些 entry 来自同一逻辑区域时才能考虑邻近上下文。
+
+---
+
+# 57. Context Token 控制
+
+不能将整个 PO 文件发送给每个 batch。
+
+每个 batch 只包含：
+
+```text
+entries
+relevant glossary
+必要 context
+```
+
+---
+
+# 58. Plural
+
+必须正确支持：
+
+```text
+msgid_plural
+msgstr[0]
+msgstr[1]
+...
+```
+
+不能假设：
+
+```text
+所有语言只有单数/复数两种
+```
+
+Plural forms 应遵循 PO metadata：
+
+```text
+Plural-Forms
+```
+
+第一版本如果无法自动生成复杂 plural 翻译，也必须：
+
+```text
+保留数据
+不损坏结构
+明确标记待审核
+```
+
+---
+
+# 59. Unicode
+
+内部统一：
+
+```text
+UTF-8
+```
+
+禁止依赖：
+
+```text
+系统默认编码
+```
+
+所有文件读取写入显式处理 Unicode。
+
+---
+
+# 60. 文件安全
+
+默认：
+
+```text
+永不直接覆盖原 PO
+```
+
+首次导出建议：
+
+```text
+game.po
+→
+game.translated.po
+```
+
+用户明确选择：
+
+```text
+Overwrite
+```
+
+才允许覆盖。
+
+覆盖前应考虑：
+
+```text
+backup
+```
+
+---
+
+# 61. Atomic Write
+
+PO 保存使用：
+
+```text
+temporary file
+↓
+validation
+↓
+atomic rename
+```
+
+尽量避免程序崩溃造成原文件损坏。
+
+---
+
+# 62. CLI
+
+核心完成后提供基本 CLI。
+
+例如：
+
+```bash
+po-translator translate game.po \
+    --source ja \
+    --target zh-CN \
+    --profile local
+```
+
+以及：
+
+```bash
+po-translator analyze game.po
+```
+
+CLI 与 GUI 必须调用相同 Service。
+
+禁止复制两套翻译逻辑。
+
+---
+
+# 63. 单元测试
+
+至少覆盖：
+
+```text
+PO parsing
+PO writing
+
+placeholder extraction
+placeholder validation
+
+term candidate extraction
+
+glossary matching
+
+batching
+
+translation memory
+
+JSON response parsing
+
+retry logic
+
+status transition
+```
+
+---
+
+# 64. Integration Test
+
+必须提供 mock LLM。
+
+例如：
+
+```python
+class FakeLLMClient:
+    ...
+```
+
+测试时禁止依赖真实 API。
+
+测试完整流程：
+
+```text
+fixture.po
+↓
+parse
+↓
+extract glossary
+↓
+fake translation
+↓
+validation
+↓
+write PO
+↓
+reopen PO
+↓
+assert structure
+```
+
+---
+
+# 65. PO Round-trip Test
+
+非常重要。
+
+测试：
+
+```text
+read original PO
+↓
+write without translation changes
+↓
+read again
+```
+
+确认：
+
+```text
+entries
+context
+flags
+comments
+plural
+metadata
+```
+
+没有明显数据丢失。
+
+---
+
+# 66. Placeholder Test Cases
+
+至少包含：
+
+```text
+Hello %s
+HP: %d
+Hello %(name)s
+Welcome {username}
+Value: {value:.2f}
+HP {current}/{max}
+Click <b>OK</b>
+Line1\nLine2
+```
+
+必须测试：
+
+```text
+missing
+changed
+duplicate
+extra
+```
+
+情况。
+
+---
+
+# 67. LLM 错误测试
+
+模拟：
+
+```text
+timeout
+HTTP 429
+HTTP 500
+HTTP 401
+
+empty response
+
+invalid JSON
+
+missing entry
+duplicated entry ID
+
+placeholder corruption
+```
+
+---
+
+# 68. Coding Rules
+
+必须：
+
+```text
+type hints
+```
+
+公共函数应完整标注。
+
+建议：
+
+```text
+ruff
+mypy
+pytest
+```
+
+代码格式：
+
+```text
+ruff format
+```
+
+不得写大量：
+
+```python
+dict[str, Any]
+```
+
+来逃避模型设计。
+
+对于重要结构使用：
+
+```text
+dataclass
+Pydantic model
+Enum
+```
+
+---
+
+# 69. 函数长度
+
+尽量保持单一职责。
+
+例如：
+
+禁止：
+
+```python
+def translate_po():
+    # parse
+    # database
+    # prompt
+    # HTTP
+    # validation
+    # write
+```
+
+需要拆分。
+
+---
+
+# 70. Exception
+
+定义自己的异常层次：
+
+```python
+POTranslatorError
+
+LLMError
+LLMNetworkError
+LLMAuthenticationError
+LLMRateLimitError
+LLMResponseError
+
+POParseError
+
+ValidationError
+
+StorageError
+```
+
+不要全局：
+
+```python
+except Exception:
+    pass
+```
+
+禁止吞异常。
+
+---
+
+# 71. UI Exception Boundary
+
+所有后台任务异常必须：
+
+```text
+捕获
+记录日志
+转成用户可理解错误
+```
+
+不得导致 GUI 直接崩溃。
+
+---
+
+# 72. 性能目标
+
+初始目标：
+
+```text
+10,000 PO entries
+```
+
+应能够正常打开和浏览。
+
+UI 不应因：
+
+```text
+加载
+搜索
+筛选
+后台翻译
+```
+
+明显卡死。
+
+不要一次为所有 Entry 创建复杂 QWidget。
+
+Entry list 推荐：
+
+```text
+QTableView
++
+QAbstractTableModel
+```
+
+禁止：
+
+```text
+10000 个 QWidget row
+```
+
+---
+
+# 73. 搜索
+
+GUI 应支持：
+
+```text
+搜索 source
+搜索 translation
+```
+
+支持按状态筛选。
+
+---
+
+# 74. 非目标
+
+第一版本不实现：
+
+```text
+多人协作
+云同步
+在线账号系统
+Web SaaS
+机器翻译 Provider
+实时协同
+Git integration
+插件市场
+```
+
+除非基础版本已经完成。
+
+---
+
+# 75. GameTranslationAgent 的使用原则
+
+可以参考：
+
+```text
+Translation → Reflection → Improve
+
+Placeholder validation
+
+Repair prompt
+
+Rate limiting
+
+OpenAI compatible endpoint
+
+Glossary prompt
+```
+
+但不得复制其整体架构。
+
+新项目必须保持自己的：
+
+```text
+Domain Layer
+Storage Layer
+Service Layer
+UI Layer
+```
+
+清晰分离。
+
+如果引用源代码，必须检查原项目 License 并遵守对应许可。
+
+---
+
+# 76. 推荐开发顺序
+
+Codex 必须按阶段开发。
+
+禁止第一步就写完整 GUI。
+
+## Phase 1
+
+实现：
+
+```text
+Domain Models
+PO Reader
+PO Writer
+Placeholder Engine
+```
+
+验收：
+
+```text
+PO round trip test
+Placeholder unit test
+```
+
+全部通过。
+
+---
+
+## Phase 2
+
+实现：
+
+```text
+LLM Client
+OpenAI-compatible API
+
+Rate Limiter
+
+Structured JSON Response
+
+Batcher
+```
+
+测试使用 Fake API。
+
+---
+
+## Phase 3
+
+实现：
+
+```text
+Translation Pipeline
+Validator
+Retry
+Repair
+```
+
+能够 CLI：
+
+```text
+input.po → output.po
+```
+
+---
+
+## Phase 4
+
+实现：
+
+```text
+Candidate Term Extraction
+Glossary
+LLM Glossary Filtering
+Glossary Translation
+Glossary Matching
+```
+
+---
+
+## Phase 5
+
+实现：
+
+```text
+SQLite
+Project
+Translation Memory
+Checkpoint
+Resume
+```
+
+---
+
+## Phase 6
+
+实现：
+
+```text
+PySide6 UI
+```
+
+GUI 只能调用已经完成的 Service。
+
+---
+
+# 77. MVP 完成标准
+
+MVP 必须能够完成以下流程。
+
+用户打开：
+
+```text
+game.po
+```
+
+填写：
+
+```text
+Base URL
+API Key
+Model
+Source Language
+Target Language
+```
+
+程序：
+
+```text
+解析 PO
+↓
+显示 entries
+↓
+分析候选术语
+↓
+LLM筛选术语
+↓
+LLM翻译术语
+↓
+用户修改术语
+↓
+开始翻译
+↓
+Translation Memory lookup
+↓
+batch translation
+↓
+placeholder validation
+↓
+retry / repair
+↓
+显示结果
+↓
+保存
+```
+
+最终生成：
+
+```text
+game.translated.po
+```
+
+并满足：
+
+```text
+原有 PO metadata 未被破坏
+
+所有成功翻译 entry 已写入 msgstr
+
+失败 entry 不写入错误翻译
+
+placeholder 未被破坏
+
+程序中途退出后可继续任务
+```
+
+---
+
+# 78. MVP 验收测试
+
+准备一个 PO：
+
+```text
+100+ entries
+```
+
+其中包含：
+
+```text
+普通字符串
+重复术语
+msgctxt
+注释
+printf placeholder
+Python placeholder
+HTML tags
+plural
+fuzzy
+已有译文
+```
+
+执行完整翻译。
+
+验收标准：
+
+### PO
+
+```text
+可以重新由 polib 正常读取
+```
+
+### Entry
+
+```text
+数量不变
+```
+
+### Metadata
+
+```text
+不丢失
+```
+
+### Placeholder
+
+成功翻译项：
+
+```text
+100% placeholder validation pass
+```
+
+### Existing Translation
+
+默认：
+
+```text
+不得被覆盖
+```
+
+### Failed Translation
+
+```text
+必须明确显示 FAILED
+```
+
+不能写入随机译文。
+
+### Resume
+
+任务执行一半：
+
+```text
+强制关闭程序
+↓
+重新打开
+```
+
+已翻译内容：
+
+```text
+不得重复请求 API
+```
+
+### Translation Memory
+
+相同 Entry 第二次执行：
+
+```text
+不得产生新的 API request
+```
+
+---
+
+# 79. Codex 实现要求
+
+Codex 在开发过程中必须遵守：
+
+1. 不擅自改变整体架构。
+2. 不因为方便而把业务逻辑写进 GUI。
+3. 不因为方便而让 PO parser 调用 LLM。
+4. 不因为方便而让 LLM client 操作数据库。
+5. 每完成一个 Phase，首先运行测试。
+6. 测试失败不得继续堆后续功能。
+7. 不删除测试来使 CI 通过。
+8. 不用大量 mock 代替核心逻辑测试。
+9. 所有网络接口均需要 timeout。
+10. 所有循环 retry 都必须存在最大次数。
+11. 所有后台任务都必须可结束。
+12. 数据写入不得依赖应用正常退出。
+13. 用户数据安全优先于翻译完成率。
+14. 如果翻译结果无法通过 validator，应标记失败，而不是强行写入。
+
+---
+
+# 80. Codex 工作方式
+
+每个 Phase 开始之前：
+
+先检查现有代码。
+
+然后输出：
+
+```text
+本阶段目标
+需要创建的文件
+需要修改的文件
+核心接口
+测试范围
+```
+
+随后实施。
+
+Phase 完成后：
+
+必须：
+
+```text
+运行 tests
+运行 lint
+```
+
+并报告：
+
+```text
+Implemented
+Tests
+Known limitations
+Next phase
+```
+
+不得在一个巨大 commit 中同时实现全部系统。
+
+---
+
+# 81. 优先级原则
+
+发生冲突时按以下优先级：
+
+```text
+PO 数据安全
+>
+翻译正确性
+>
+可恢复性
+>
+API 成本
+>
+性能
+>
+UI 美观
+```
+
+换言之：
+
+宁可：
+
+```text
+FAILED
+```
+
+也不能写入可能损坏文件或破坏变量的翻译。
+
+宁可：
+
+```text
+让用户人工审核
+```
+
+也不能因为 LLM 看起来“差不多正确”就绕过 validator。
+
+---
+
+# 82. 最终产品设计原则
+
+整个系统应遵循：
+
+```text
+Parser
+负责理解文件结构
+
+Term Engine
+负责发现候选术语
+
+LLM
+负责语义判断与语言生成
+
+Glossary
+负责全局一致性
+
+Translation Memory
+负责避免重复工作
+
+Validator
+负责防止 LLM 破坏格式
+
+Storage
+负责保证任务可恢复
+
+UI
+负责让用户控制整个流程
+```
+
+最终系统应是：
+
+> 一个具有 LLM 翻译能力的本地化工程工具。
+
+而不是：
+
+> 一个能够上传 PO 文件的聊天机器人。
+
+任何架构决策都应围绕这一目标进行。

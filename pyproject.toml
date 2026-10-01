@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "po-llm-translator"
+version = "0.1.0"
+description = "A robust LLM-assisted translation tool for GNU gettext PO/POT localization files."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    { name = "TranslateAgent Team" }
+]
+dependencies = [
+    "polib>=1.2.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.27.0",
+    "PySide6>=6.6.0"
+]
+
+[project.scripts]
+po-translator = "po_translator.cli:main"
+po-translator-gui = "po_translator.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
