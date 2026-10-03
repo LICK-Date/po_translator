@@ -28,3 +28,4 @@ ENV/
 htmlcov/
 *.sqlite3
 *.db
+tests/
